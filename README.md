@@ -103,21 +103,21 @@ export OPENAI_API_BASE="http://localhost:9000/v1"
 # Quick smoke test (1 task, baseline)
 python src/run_eval.py \
   --env retail --agent-strategy react \
-  --model agent-14b --model-provider openai \
+  --model agent-4b --model-provider openai \
   --user-model user-32b --user-model-provider openai \
   --task-ids 0 --num-trials 1 --baseline
 
 # Quick smoke test (1 task, full pipeline)
 python src/run_eval.py \
   --env retail --agent-strategy react \
-  --model agent-14b --model-provider openai \
+  --model agent-4b --model-provider openai \
   --user-model user-32b --user-model-provider openai \
   --task-ids 0 --num-trials 1
 
 # Full run (all tasks, 5 trials)
 python src/run_eval.py \
   --env retail --agent-strategy react \
-  --model agent-14b --model-provider openai \
+  --model agent-4b --model-provider openai \
   --user-model user-32b --user-model-provider openai \
   --num-trials 5
 ```
