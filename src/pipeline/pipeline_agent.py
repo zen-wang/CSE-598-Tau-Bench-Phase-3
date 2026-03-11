@@ -160,15 +160,18 @@ _THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
 def strip_think_tags(text: str) -> str:
-    """Strip <think>...</think> blocks from user simulator messages.
+    """Strip <think>...</think> blocks from model messages.
 
-    The GPT-4o user simulator wraps every message in <think> reasoning tags
-    (2-4K chars each). Stripping these:
-    - Saves ~600-1100 tokens per user message
-    - Prevents polluting the task planner checklist
-    - Slows context window growth significantly
+    Both the user simulator and the Qwen3 agent wrap messages in <think>
+    reasoning tags (600-4K chars each). Stripping these saves tokens and
+    prevents context window bloat.
     """
-    return _THINK_TAG_RE.sub("", text).strip()
+    text = _THINK_TAG_RE.sub("", text)
+    # Also strip unclosed <think> (model ran out of tokens mid-reasoning)
+    if "<think>" in text:
+        idx = text.rfind("<think>")
+        text = text[:idx]
+    return text.strip()
 
 
 # Patterns for extracting key IDs from dropped messages (facts buffer)
@@ -535,7 +538,9 @@ class PipelineAgent(Agent):
             )
 
             # 6e. Append to full history (the complete record)
-            # Strip <think> tags from user simulator responses to save tokens
+            # Strip <think> tags from both agent and user sim messages
+            if isinstance(message.get("content"), str):
+                message["content"] = strip_think_tags(message["content"])
             obs_for_history = env_response.observation
             if action.name == RESPOND_ACTION_NAME:
                 obs_for_history = strip_think_tags(obs_for_history)

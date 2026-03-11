@@ -120,7 +120,7 @@ class TaskPlanner:
                 custom_llm_provider=self.provider,
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=300,
+                max_tokens=1024,
             )
             content = res.choices[0].message.content.strip()
             cost = res._hidden_params.get("response_cost") or 0
@@ -171,6 +171,10 @@ class TaskPlanner:
         """Extract JSON array from LLM output, with fallback to line-splitting."""
         # Strip <think>...</think> blocks from Qwen3 reasoning output
         content = _THINK_TAG_RE.sub("", content).strip()
+        # Also strip unclosed <think> (model ran out of tokens mid-reasoning)
+        if "<think>" in content:
+            idx = content.rfind("<think>")
+            content = content[:idx].strip()
         if not content:
             return []
 
