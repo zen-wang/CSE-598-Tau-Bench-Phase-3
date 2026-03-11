@@ -137,6 +137,15 @@ Try to be helpful and always follow the policy. Always make sure you generate va
 """
 
 
+# Verb keywords are high-priority (directly actionable); noun keywords are
+# lower-priority (informational context).  Used to cap injection at 3 matches.
+_VERB_KEYWORDS = {
+    "cancel", "return", "exchange", "modify", "book", "change",
+    "upgrade", "downgrade", "compensat", "certificate",
+}
+MAX_POLICY_MATCHES = 3
+
+
 class ContextInjector:
     def build_prompt(
         self,
@@ -148,76 +157,93 @@ class ContextInjector:
         strategy: str,
     ) -> str:
         """
-        Build the full system prompt with policy injection appended AFTER the wiki.
+        Build the full system prompt with policy injection.
 
-        Layout (preserves prefix caching on wiki):
-          react/act: wiki + injection + tools + instruction
-          tool-calling: wiki + injection  (tools passed via tools= param)
+        Layout (Rec 5 — reminders & checklist placed AFTER instruction for
+        recency bias in small models):
+          react/act: wiki + matched_policies + tools + instruction + reminders + checklist
+          tool-calling: wiki + matched_policies + reminders + checklist
         """
-        injection = self._build_injection(first_user_msg, checklist, domain)
+        policies_mod = (
+            _get_retail_policies() if domain == "retail" else _get_airline_policies()
+        )
+
+        # Matched policy excerpts (capped at MAX_POLICY_MATCHES, verb-priority)
+        matched = self._match_policies(first_user_msg, policies_mod)
+        policy_block = ""
+        if matched:
+            policy_block = "\n# Relevant Policy Details\n\n" + "\n\n".join(
+                excerpt for excerpt, _ in matched
+            )
+
+        # Reminders + checklist — placed at the END for recency bias
+        tail_parts = []
+        tail_parts.append(
+            "\n# REMINDERS BEFORE YOU BEGIN\n"
+            + policies_mod.AUTH_REMINDER + "\n\n"
+            + policies_mod.CONFIRMATION_REMINDER + "\n\n"
+            + policies_mod.GENERAL_REMINDERS
+        )
+        if checklist:
+            # Sanity check: discard if any step looks like XML tags or raw reasoning
+            sane = all(
+                not step.strip().startswith("<")
+                and not step.strip().endswith(">")
+                and len(step) < 200
+                for step in checklist
+            )
+            if sane:
+                tail_parts.append(
+                    "\n# Task Checklist\n"
+                    "Follow these steps in order. Do NOT skip any step or claim "
+                    "completion before executing the required tool calls:\n"
+                    + "\n".join(f"  {i}. {step}" for i, step in enumerate(checklist, 1))
+                )
+        tail_block = "\n".join(tail_parts)
 
         if strategy in ("react", "act"):
             instruction = REACT_INSTRUCTION if strategy == "react" else ACT_INSTRUCTION
             return (
                 wiki
-                + "\n\n" + injection
+                + policy_block
                 + "\n#Available tools\n"
                 + json.dumps(tools_info)
                 + instruction
+                + "\n" + tail_block
             )
         else:
             # tool-calling: tools passed separately
-            return wiki + "\n\n" + injection
-
-    def _build_injection(
-        self, user_msg: str, checklist: List[str], domain: str
-    ) -> str:
-        """Assemble the injection block: reminders + matched policies + checklist."""
-        policies_mod = (
-            _get_retail_policies() if domain == "retail" else _get_airline_policies()
-        )
-
-        parts = []
-
-        # 1. Auth reminder (always)
-        parts.append(policies_mod.AUTH_REMINDER)
-
-        # 2. Confirmation reminder (always)
-        parts.append(policies_mod.CONFIRMATION_REMINDER)
-
-        # 3. General reminders (always)
-        parts.append(policies_mod.GENERAL_REMINDERS)
-
-        # 4. Matched policy excerpts
-        matched = self._match_policies(user_msg, policies_mod)
-        if matched:
-            parts.append("\n# Relevant Policy Details")
-            for excerpt, _ in matched:
-                parts.append(excerpt)
-
-        # 5. Task checklist (if planner produced one)
-        if checklist:
-            parts.append("\n# Task Checklist")
-            parts.append(
-                "Follow these steps in order. Do NOT skip any step or claim "
-                "completion before executing the required tool calls:"
-            )
-            for i, step in enumerate(checklist, 1):
-                parts.append(f"  {i}. {step}")
-
-        return "\n\n".join(parts)
+            return wiki + policy_block + "\n" + tail_block
 
     def _match_policies(
         self, user_msg: str, policies_mod
     ) -> List[Tuple[str, List[str]]]:
-        """Match user message keywords against the policy map."""
+        """Match user message keywords against the policy map.
+
+        Rec 4: Cap at MAX_POLICY_MATCHES, prioritizing verb keywords over
+        noun keywords to reduce prompt bloat for small models.
+        """
         msg_lower = user_msg.lower()
-        matched = []
-        seen_keys = set()
+        verb_matches: List[Tuple[str, List[str]]] = []
+        noun_matches: List[Tuple[str, List[str]]] = []
+        seen_keys: set = set()
+        # M7 fix: deduplicate by excerpt content prefix to avoid injecting
+        # near-identical policy excerpts (e.g., "compensat" and "certificate"
+        # in airline both map to nearly the same compensation policy text).
+        seen_excerpts: set = set()
 
         for keyword, (excerpt, tools) in policies_mod.POLICY_MAP.items():
             if keyword in msg_lower and keyword not in seen_keys:
-                matched.append((excerpt, tools))
                 seen_keys.add(keyword)
+                excerpt_key = excerpt[:100]
+                if excerpt_key in seen_excerpts:
+                    continue
+                seen_excerpts.add(excerpt_key)
+                if keyword in _VERB_KEYWORDS:
+                    verb_matches.append((excerpt, tools))
+                else:
+                    noun_matches.append((excerpt, tools))
 
-        return matched
+        # Verb matches first, then fill remaining slots with noun matches
+        combined = verb_matches + noun_matches
+        return combined[:MAX_POLICY_MATCHES]

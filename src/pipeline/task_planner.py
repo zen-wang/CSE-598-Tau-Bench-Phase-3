@@ -9,6 +9,8 @@ continues without a checklist.
 """
 
 import json
+import logging
+import re
 from typing import List, Tuple
 from litellm import completion
 
@@ -46,6 +48,43 @@ For compensation, verify: user explicitly complained and asked? eligible members
 
 Output ONLY a JSON array of strings. No other text.
 Example: ["Obtain user id", "Look up reservation details", "Verify cancellation eligibility (check booking time, cabin class, insurance)", "Present cancellation details and get confirmation", "Cancel reservation", "Confirm refund timeline to user"]"""
+
+
+# Valid tool names for validation (union of both domains)
+_KNOWN_TOOL_NAMES = {
+    # Retail
+    "find_user_id_by_email", "find_user_id_by_name_zip",
+    "get_order_details", "get_product_details", "get_user_details",
+    "list_all_product_types",
+    "cancel_pending_order", "modify_pending_order_items",
+    "modify_pending_order_address", "modify_pending_order_payment",
+    "return_delivered_order_items", "exchange_delivered_order_items",
+    "modify_user_address",
+    # Airline
+    "get_reservation_details", "search_direct_flight", "search_onestop_flight",
+    "list_all_airports",
+    "book_reservation", "cancel_reservation",
+    "update_reservation_flights", "update_reservation_baggages",
+    "update_reservation_passengers", "send_certificate",
+    # M2: Shared tools present in both domains
+    "calculate", "think", "transfer_to_human_agents",
+}
+
+# H2 fix: Common underscore identifiers that are NOT tool names.
+# Without this whitelist, _validate_checklist falsely flags steps
+# mentioning user_id, order_id, etc. as "hallucinated tools".
+_KNOWN_IDENTIFIERS = {
+    "user_id", "order_id", "item_id", "item_ids", "reservation_id",
+    "payment_method_id", "payment_id", "address_id", "flight_id",
+    "basic_economy", "premium_economy", "first_class", "business_class",
+    "one_way", "round_trip", "credit_card", "gift_card", "debit_card",
+    "travel_insurance", "nonfree_baggages", "total_baggages",
+    "new_item_ids", "flight_type",
+}
+
+MIN_CHECKLIST_STEPS = 2
+MAX_CHECKLIST_STEPS = 8
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
 class TaskPlanner:
@@ -86,12 +125,55 @@ class TaskPlanner:
             content = res.choices[0].message.content.strip()
             cost = res._hidden_params.get("response_cost") or 0
             checklist = self._parse_steps(content)
+            checklist = self._validate_checklist(checklist)
             return checklist, cost
-        except Exception:
+        except Exception as e:
+            logging.getLogger(__name__).debug("Task planner failed: %s", e)
             return [], 0.0
+
+    def _validate_checklist(self, checklist: List[str]) -> List[str]:
+        """Rec 6: Validate planner output — drop bad steps, discard pathological lists."""
+        if not checklist:
+            return []
+
+        # Drop steps that reference tool names not in the known set
+        validated = []
+        for step in checklist:
+            # Check if the step mentions a tool-like name that doesn't exist
+            # (e.g., "call make_reservation" when the real tool is book_reservation)
+            words = step.replace("(", " ").replace(")", " ").split()
+            has_bad_tool = False
+            for word in words:
+                # If it looks like a tool name (has underscores) but isn't known
+                if "_" in word and len(word) > 5:
+                    # Strip trailing punctuation
+                    clean = word.strip(".,;:\"'")
+                    if (
+                        clean not in _KNOWN_TOOL_NAMES
+                        and clean not in _KNOWN_IDENTIFIERS
+                        and any(c.islower() for c in clean)
+                    ):
+                        # Only flag if it looks like a function name
+                        # (all lowercase + underscores)
+                        if clean.replace("_", "").isalpha():
+                            has_bad_tool = True
+                            break
+            if not has_bad_tool:
+                validated.append(step)
+
+        # Discard pathological checklists
+        if len(validated) < MIN_CHECKLIST_STEPS or len(validated) > MAX_CHECKLIST_STEPS:
+            return []
+
+        return validated
 
     def _parse_steps(self, content: str) -> List[str]:
         """Extract JSON array from LLM output, with fallback to line-splitting."""
+        # Strip <think>...</think> blocks from Qwen3 reasoning output
+        content = _THINK_TAG_RE.sub("", content).strip()
+        if not content:
+            return []
+
         # Try direct JSON parse
         try:
             parsed = json.loads(content)
@@ -100,17 +182,16 @@ class TaskPlanner:
         except json.JSONDecodeError:
             pass
 
-        # Try extracting JSON from markdown code block
-        if "```" in content:
-            start = content.find("[")
-            end = content.rfind("]")
-            if start != -1 and end != -1:
-                try:
-                    parsed = json.loads(content[start : end + 1])
-                    if isinstance(parsed, list):
-                        return [str(s) for s in parsed]
-                except json.JSONDecodeError:
-                    pass
+        # Try extracting JSON array from anywhere in the content
+        start = content.find("[")
+        end = content.rfind("]")
+        if start != -1 and end != -1:
+            try:
+                parsed = json.loads(content[start : end + 1])
+                if isinstance(parsed, list):
+                    return [str(s) for s in parsed]
+            except json.JSONDecodeError:
+                pass
 
         # Fallback: split by numbered lines
         lines = []

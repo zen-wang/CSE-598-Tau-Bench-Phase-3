@@ -55,10 +55,18 @@ AIRLINE_READ_TOOLS = {
 # Confirmation keywords
 CONFIRMATION_WORDS = {"yes", "confirm", "proceed", "go ahead", "sure", "that's correct", "correct"}
 
+# Negation prefixes that invalidate a confirmation match
+NEGATION_PREFIXES = ["not ", "don't ", "no ", "no, ", "i'm not ", "that's not ", "isn't ", "cannot "]
+
 # Patterns for extracting IDs
 ORDER_ID_PATTERN = re.compile(r"#W\d+")
 RESERVATION_ID_PATTERN = re.compile(r"\b[A-Z0-9]{6}\b")
 USER_ID_PATTERN = re.compile(r"\b[a-z]+_[a-z]+_\d+\b")
+
+# M5 fix: Prefixes that match USER_ID_PATTERN but are payment methods, not user IDs
+_PAYMENT_ID_PREFIXES = (
+    "credit_card_", "gift_card_", "debit_card_", "paypal_", "certificate_",
+)
 
 
 class StateTracker:
@@ -80,9 +88,11 @@ class StateTracker:
         self.consequential_calls: List[Dict[str, Any]] = []
         self.auth_calls: List[Dict[str, Any]] = []
         self.read_calls: List[Dict[str, Any]] = []
+        self.last_consequential_succeeded: Optional[bool] = None
 
         # Conversation tracking
         self.user_confirmations: List[str] = []
+        self._user_msgs_since_confirm: int = 999  # no confirmation yet
         self.steps_taken: int = 0
         self.respond_count: int = 0
         self.consecutive_responds: int = 0
@@ -123,6 +133,10 @@ class StateTracker:
         if source == "respond" or source == "user":
             return
 
+        # Track whether the last consequential call succeeded
+        if source in self.consequential_tool_names:
+            self.last_consequential_succeeded = not observation.startswith("Error")
+
         # Try to parse as JSON for structured tool responses
         try:
             data = json.loads(observation)
@@ -130,11 +144,14 @@ class StateTracker:
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # Auth tool response: if source is an auth tool and response is a user_id
+        # Auth tool response: if source is an auth tool and response is not an error
         if source in self.auth_tool_names:
             if not observation.startswith("Error"):
                 self.authenticated = True
-                self.user_id = observation.strip().strip('"')
+                # Only set user_id from raw observation if _extract_from_json
+                # didn't already parse it (avoid overwriting with raw JSON blob)
+                if not self.user_id:
+                    self.user_id = observation.strip().strip('"')
 
         # Extract order IDs from any tool response
         order_ids = ORDER_ID_PATTERN.findall(observation)
@@ -149,15 +166,38 @@ class StateTracker:
                 if rid not in self.reservation_ids and len(rid) == 6:
                     self.reservation_ids.append(rid)
 
-    def update_from_user_message(self, message: str) -> None:
-        """Called when a user message arrives. Extracts confirmation signals and IDs."""
+    def update_from_user_message(
+        self, message: str, is_initial: bool = False
+    ) -> None:
+        """Called when a user message arrives. Extracts confirmation signals and IDs.
+
+        Args:
+            is_initial: True for the first task message. Skips confirmation
+                detection so phrases like "Sure, I'd like to cancel..." in the
+                task description don't pre-load a stale confirmation (M6 fix).
+        """
         msg_lower = message.lower().strip()
 
-        # Check for confirmation
-        for word in CONFIRMATION_WORDS:
-            if word in msg_lower:
+        # Track user messages since last confirmation (for recency check)
+        self._user_msgs_since_confirm += 1
+
+        # M6 fix: skip confirmation detection on the initial task message
+        if not is_initial:
+            # Check for confirmation (with negation filtering)
+            confirmed = False
+            for word in CONFIRMATION_WORDS:
+                idx = msg_lower.find(word)
+                if idx >= 0:
+                    # Check for negation in the preceding context
+                    prefix = msg_lower[max(0, idx - 15):idx]
+                    if any(neg in prefix for neg in NEGATION_PREFIXES):
+                        continue  # Negated — not a real confirmation
+                    confirmed = True
+                    break
+
+            if confirmed:
                 self.user_confirmations.append(message)
-                break
+                self._user_msgs_since_confirm = 0
 
         # Extract order IDs from user messages
         order_ids = ORDER_ID_PATTERN.findall(message)
@@ -166,10 +206,14 @@ class StateTracker:
                 self.order_ids.append(oid)
 
         # Extract user IDs from user messages (airline: "my user id is xxx_yyy_1234")
+        # M5 fix: filter out payment method IDs that match the same regex
         if self.domain == "airline" and not self.user_id:
             user_ids = USER_ID_PATTERN.findall(message)
-            if user_ids:
-                self.user_id = user_ids[0]
+            for uid in user_ids:
+                if not uid.startswith(_PAYMENT_ID_PREFIXES):
+                    self.user_id = uid
+                    self.authenticated = True
+                    break
 
         # Extract reservation IDs
         if self.domain == "airline":
@@ -183,8 +227,12 @@ class StateTracker:
         return self.authenticated
 
     def has_confirmation(self) -> bool:
-        """Returns True if user has given at least one confirmation."""
-        return len(self.user_confirmations) > 0
+        """Returns True if user gave a confirmation in a recent turn.
+
+        Only considers confirmations within the last 2 user messages to avoid
+        stale confirmations permanently disabling the confirmation gate.
+        """
+        return self._user_msgs_since_confirm < 2
 
     def get_tool_call_count(self) -> int:
         """Returns total number of tool calls made."""

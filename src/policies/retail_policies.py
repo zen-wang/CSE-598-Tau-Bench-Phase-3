@@ -21,7 +21,10 @@ CONFIRMATION_REMINDER = (
 GENERAL_REMINDERS = (
     "- Make at most one tool call at a time. If you call a tool, do not respond to the user in the same turn.\n"
     "- Do not make up information. Use tools to look up order details, product details, etc.\n"
-    "- Exchange or modify order tools can only be called ONCE. Collect ALL items to be changed before calling."
+    "- Exchange or modify order tools can only be called ONCE. Collect ALL items to be changed before calling.\n"
+    "- If you need user credentials (email, name, zip) to proceed, ASK the user using respond. "
+    "Do NOT call transfer_to_human_agents just because the user hasn't provided credentials yet. "
+    "transfer_to_human_agents is ONLY for requests that are genuinely outside your capabilities."
 )
 
 # Keyword → (policy_excerpt, relevant_tool_names)

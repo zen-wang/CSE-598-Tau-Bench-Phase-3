@@ -22,7 +22,10 @@ CONFIRMATION_REMINDER = (
 GENERAL_REMINDERS = (
     "- Make at most one tool call at a time. If you call a tool, do not respond to the user in the same turn.\n"
     "- Do not make up information. Use tools to look up reservation details, flight availability, etc.\n"
-    "- The current time is 2024-05-15 15:00:00 EST."
+    "- The current time is 2024-05-15 15:00:00 EST.\n"
+    "- If you need the user's user_id to proceed, ASK the user using respond. "
+    "Do NOT call transfer_to_human_agents just because the user hasn't provided their user_id yet. "
+    "transfer_to_human_agents is ONLY for requests that are genuinely outside your capabilities."
 )
 
 # Keyword → (policy_excerpt, relevant_tool_names)

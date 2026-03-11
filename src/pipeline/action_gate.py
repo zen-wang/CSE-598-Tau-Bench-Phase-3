@@ -6,8 +6,10 @@ After exhaustion, lets the action through.
 """
 
 import json
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 from litellm import completion
+from litellm.exceptions import ContextWindowExceededError
 
 from tau_bench.types import (
     Action,
@@ -128,14 +130,17 @@ class ActionGate:
 
             # Build correction and retry
             correction = self._build_correction(issues)
-            correction_msg = self._format_correction(correction)
+            correction_msg = self._format_correction(correction, message)
 
             # Add original message + correction to messages for regeneration
             extra_messages.append(message)
             extra_messages.append(correction_msg)
 
-            # Regenerate
-            regen_messages = messages + extra_messages
+            # Regenerate (truncate to stay within context window)
+            from src.pipeline.pipeline_agent import build_llm_context
+            regen_messages, _ = build_llm_context(
+                self.model, messages + extra_messages
+            )
             message, action, cost = self._regenerate(regen_messages)
             total_cost += cost
 
@@ -167,6 +172,18 @@ class ActionGate:
                     "HALLUCINATED COMPLETION: You claimed the task is complete but no "
                     "consequential tool call was made. You must actually execute the "
                     "required action using the appropriate tool before claiming completion."
+                )
+
+            # Rec 7: Also catch claiming success after a FAILED consequential call
+            if (
+                has_completion_phrase
+                and not has_zero_consequential
+                and state.last_consequential_succeeded is False
+            ):
+                issues.append(
+                    "FAILED ACTION COMPLETION: You claimed the task is complete but "
+                    "the last consequential tool call returned an error. Check the "
+                    "error, fix the issue, and retry the tool call before claiming completion."
                 )
 
         # Check 2: Inaction (3+ steps, zero tool calls, current action is respond)
@@ -239,12 +256,31 @@ class ActionGate:
         correction += "\n\nPlease correct your action accordingly."
         return correction
 
-    def _format_correction(self, correction: str) -> Dict[str, Any]:
-        """Format correction as a message matching the agent strategy."""
+    def _format_correction(
+        self, correction: str, message: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Format correction as a message matching the agent strategy.
+
+        For tool-calling, the correction must be a role='tool' response to
+        the rejected tool call to maintain valid message ordering.
+        """
         if self.agent_strategy in ("react", "act"):
             return {"role": "user", "content": "API output: " + correction}
         else:
-            return {"role": "user", "content": correction}
+            # Tool-calling: if the rejected message had tool_calls, respond
+            # as a tool result to maintain valid message structure
+            if (
+                message.get("tool_calls")
+                and len(message["tool_calls"]) > 0
+            ):
+                return {
+                    "role": "tool",
+                    "tool_call_id": message["tool_calls"][0]["id"],
+                    "name": message["tool_calls"][0]["function"]["name"],
+                    "content": correction,
+                }
+            else:
+                return {"role": "user", "content": correction}
 
     def _regenerate(
         self, messages: List[Dict[str, Any]]
@@ -258,14 +294,28 @@ class ActionGate:
     def _regenerate_react(
         self, messages: List[Dict[str, Any]]
     ) -> Tuple[Dict[str, Any], Action, float]:
-        res = completion(
-            model=self.model,
-            custom_llm_provider=self.provider,
-            messages=messages,
-            temperature=self.temperature,
-        )
+        try:
+            res = completion(
+                model=self.model,
+                custom_llm_provider=self.provider,
+                messages=messages,
+                temperature=self.temperature,
+            )
+        except ContextWindowExceededError:
+            logging.getLogger(__name__).warning(
+                "ContextWindowExceededError in gate regen, "
+                "keeping only head + last 4 messages."
+            )
+            if len(messages) > 6:
+                messages = messages[:2] + messages[-4:]
+            res = completion(
+                model=self.model,
+                custom_llm_provider=self.provider,
+                messages=messages,
+                temperature=self.temperature,
+            )
         message = res.choices[0].message
-        action_str = message.content.split("Action:")[-1].strip()
+        action_str = (message.content or "").split("Action:")[-1].strip()
         try:
             action_parsed = json.loads(action_str)
         except json.JSONDecodeError:
@@ -284,13 +334,28 @@ class ActionGate:
     def _regenerate_tool_calling(
         self, messages: List[Dict[str, Any]]
     ) -> Tuple[Dict[str, Any], Action, float]:
-        res = completion(
-            messages=messages,
-            model=self.model,
-            custom_llm_provider=self.provider,
-            tools=self.tools_info,
-            temperature=self.temperature,
-        )
+        try:
+            res = completion(
+                messages=messages,
+                model=self.model,
+                custom_llm_provider=self.provider,
+                tools=self.tools_info,
+                temperature=self.temperature,
+            )
+        except ContextWindowExceededError:
+            logging.getLogger(__name__).warning(
+                "ContextWindowExceededError in gate regen (tool-calling), "
+                "keeping only head + last 4 messages."
+            )
+            if len(messages) > 6:
+                messages = messages[:2] + messages[-4:]
+            res = completion(
+                messages=messages,
+                model=self.model,
+                custom_llm_provider=self.provider,
+                tools=self.tools_info,
+                temperature=self.temperature,
+            )
         next_message = res.choices[0].message.model_dump()
         action = _message_to_action(next_message)
         cost = res._hidden_params.get("response_cost") or 0
