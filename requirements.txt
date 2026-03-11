@@ -1,2 +1,6 @@
+vllm
 litellm
 pydantic
+flask
+requests
+tiktoken
