@@ -55,17 +55,7 @@ tmux new -s pipeline
 # Split into 4 panes (run these inside tmux):
 # Ctrl+b %     → split vertical
 # Ctrl+b "     → split horizontal
-# Ctrl+b o     → switch between panes
-```
-
-Or create all 4 panes in one command:
-
-```bash
-tmux new-session -s pipeline \; \
-  split-window -h \; \
-  split-window -v \; \
-  select-pane -t 0 \; \
-  split-window -v \;
+# Ctrl+b direction key     → switch between panes
 ```
 
 ### Step 2: In EVERY pane, load the environment
@@ -81,13 +71,17 @@ export HF_HOME=/scratch/$USER/huggingface_shared
 **Pane 1 — User Simulator (32B)**
 
 ```bash
-# <your vllm serve command for user-32b here>
+vllm serve Qwen/Qwen3-32B-AWQ --served-model-name user-32b --port 8001 \
+ --gpu-memory-utilization 0.70 --enforce-eager --max-model-len 40960 \
+  --enable-prefix-caching 
 ```
 
-**Pane 2 — Agent Model**
+**Pane 2 — Agent Model 4B for Example**
 
 ```bash
-# <your vllm serve command for agent here>
+vllm serve Qwen/Qwen3-4B-AWQ --served-model-name agent-4b --port 8000 \
+  --gpu-memory-utilization 0.25 --enforce-eager --max-model-len 40960 \
+  --enable-prefix-caching
 ```
 
 Wait for both servers to print `Uvicorn running on ...` before proceeding.
@@ -106,7 +100,26 @@ The proxy listens on port 9000 and routes requests by model name to the correct 
 export OPENAI_API_KEY="dummy"
 export OPENAI_API_BASE="http://localhost:9000/v1"
 
-# <your python src/run_eval.py command here>
+# Quick smoke test (1 task, baseline)
+python src/run_eval.py \
+  --env retail --agent-strategy react \
+  --model agent-14b --model-provider openai \
+  --user-model user-32b --user-model-provider openai \
+  --task-ids 0 --num-trials 1 --baseline
+
+# Quick smoke test (1 task, full pipeline)
+python src/run_eval.py \
+  --env retail --agent-strategy react \
+  --model agent-14b --model-provider openai \
+  --user-model user-32b --user-model-provider openai \
+  --task-ids 0 --num-trials 1
+
+# Full run (all tasks, 5 trials)
+python src/run_eval.py \
+  --env retail --agent-strategy react \
+  --model agent-14b --model-provider openai \
+  --user-model user-32b --user-model-provider openai \
+  --num-trials 5
 ```
 
 ### Step 4: Verify connectivity (optional, in pane 4)
