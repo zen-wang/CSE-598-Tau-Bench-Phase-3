@@ -40,12 +40,18 @@ PROXY_PORT=9000
 
 # GPU memory allocation per agent size
 case "$AGENT_SIZE" in
-    4b)  AGENT_GPU=0.25; USER_GPU=0.70; CONCURRENCY=3 ;;
+    4b)  AGENT_GPU=0.15; USER_GPU=0.55; CONCURRENCY=3 ;;
     8b)  AGENT_GPU=0.20; USER_GPU=0.55; CONCURRENCY=3 ;;
     14b) AGENT_GPU=0.30; USER_GPU=0.55; CONCURRENCY=2 ;;
     32b) AGENT_GPU=0.45; USER_GPU=0.45; CONCURRENCY=1 ;;
     *)   echo "Unknown agent size: $AGENT_SIZE"; exit 1 ;;
 esac
+
+# --- Log setup (works for both srun and sbatch) ---
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOGFILE="results/${STRATEGY}-agent-${AGENT_SIZE}-${ENV}-${TIMESTAMP}.log"
+mkdir -p results
+echo "Logging to: ${LOGFILE}"
 
 echo "============================================"
 echo "Agent: Qwen3-${AGENT_SIZE^^}-AWQ (gpu=${AGENT_GPU})"
@@ -72,7 +78,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- Start vLLM servers ---
+# --- Start vLLM servers (sequentially to avoid GPU memory contention) ---
 echo "Starting user simulator (32B) on port ${USER_PORT}..."
 vllm serve Qwen/Qwen3-32B-AWQ \
     --served-model-name user-32b \
@@ -82,6 +88,19 @@ vllm serve Qwen/Qwen3-32B-AWQ \
     --max-model-len 40960 \
     --enable-prefix-caching \
     --max-num-seqs 8 &
+
+echo "Waiting for user simulator to be ready..."
+for i in $(seq 1 60); do
+    if curl -s http://localhost:${USER_PORT}/health > /dev/null 2>&1; then
+        echo "  User sim (port ${USER_PORT}) ready"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "ERROR: User sim not ready after 5 minutes"
+        exit 1
+    fi
+    sleep 5
+done
 
 echo "Starting agent (${AGENT_SIZE^^}) on port ${AGENT_PORT}..."
 vllm serve Qwen/Qwen3-${AGENT_SIZE^^}-AWQ \
@@ -93,20 +112,17 @@ vllm serve Qwen/Qwen3-${AGENT_SIZE^^}-AWQ \
     --enable-prefix-caching \
     --max-num-seqs 16 &
 
-# --- Wait for vLLM servers to be ready ---
-echo "Waiting for vLLM servers to load models..."
-for PORT in ${USER_PORT} ${AGENT_PORT}; do
-    for i in $(seq 1 60); do
-        if curl -s http://localhost:${PORT}/health > /dev/null 2>&1; then
-            echo "  Port ${PORT} ready"
-            break
-        fi
-        if [ $i -eq 60 ]; then
-            echo "ERROR: Port ${PORT} not ready after 5 minutes"
-            exit 1
-        fi
-        sleep 5
-    done
+echo "Waiting for agent to be ready..."
+for i in $(seq 1 60); do
+    if curl -s http://localhost:${AGENT_PORT}/health > /dev/null 2>&1; then
+        echo "  Agent (port ${AGENT_PORT}) ready"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "ERROR: Agent not ready after 5 minutes"
+        exit 1
+    fi
+    sleep 5
 done
 
 # --- Start proxy ---
