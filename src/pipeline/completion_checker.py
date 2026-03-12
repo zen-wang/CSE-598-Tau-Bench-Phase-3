@@ -24,7 +24,7 @@ class CompletionChecker:
             "checklist": checklist,
             "checklist_count": len(checklist),
             "auth_performed": state.has_auth(),
-            "confirmation_received": state.has_confirmation(),
+            "confirmation_received": len(state.user_confirmations) > 0,
             "total_tool_calls": state.get_tool_call_count(),
             "consequential_tools_called": [c["name"] for c in state.consequential_calls],
             "auth_tools_called": [c["name"] for c in state.auth_calls],
@@ -57,7 +57,7 @@ class CompletionChecker:
         issues = []
         if not state.has_auth() and state.consequential_calls:
             issues.append("Consequential action taken without authentication")
-        if not state.has_confirmation() and state.consequential_calls:
+        if len(state.user_confirmations) == 0 and state.consequential_calls:
             issues.append("Consequential action taken without user confirmation")
         if state.get_tool_call_count() == 0 and state.steps_taken > 0:
             issues.append("No tool calls made despite taking steps")

@@ -9,13 +9,15 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 from litellm import completion
-from litellm.exceptions import ContextWindowExceededError
+from litellm.exceptions import ContextWindowExceededError, Timeout
 
 from tau_bench.types import (
     Action,
     RESPOND_ACTION_NAME,
     RESPOND_ACTION_FIELD_NAME,
 )
+
+logger = logging.getLogger(__name__)
 
 from src.pipeline.state_tracker import (
     StateTracker,
@@ -141,7 +143,14 @@ class ActionGate:
             regen_messages, _ = build_llm_context(
                 self.model, messages + extra_messages
             )
-            message, action, cost = self._regenerate(regen_messages)
+            try:
+                message, action, cost = self._regenerate(regen_messages)
+            except Timeout:
+                logger.warning(
+                    "Timeout during action gate regeneration, "
+                    "passing original action through."
+                )
+                break
             total_cost += cost
 
         return action, message, total_cost, extra_messages
@@ -186,13 +195,21 @@ class ActionGate:
                     "error, fix the issue, and retry the tool call before claiming completion."
                 )
 
-        # Check 2: Inaction (3+ steps, zero tool calls, current action is respond)
+        # Check 2: Inaction / Auth stall
         if (
             action.name == RESPOND_ACTION_NAME
             and state.steps_taken >= 3
             and state.get_tool_call_count() == 0
         ):
-            if self.domain == "retail":
+            # Auth stall: 6+ steps with no tool calls and user never authenticated
+            if state.steps_taken >= 6 and not state.authenticated:
+                issues.append(
+                    "AUTH STALL: The user has been unable to provide authentication "
+                    "credentials after multiple attempts. You must transfer the "
+                    "customer to a human agent using transfer_to_human_agents. "
+                    "Do not continue asking for credentials."
+                )
+            elif self.domain == "retail":
                 issues.append(
                     "INACTION: You have taken multiple steps without calling any tools. "
                     "Start by authenticating the user via find_user_id_by_email or "

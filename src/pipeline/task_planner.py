@@ -28,6 +28,7 @@ ALWAYS include these steps when applicable:
 6. Confirm completion to the user
 
 Output ONLY a JSON array of strings. No other text.
+Do NOT include any <think> tags or reasoning. Respond with ONLY the JSON array, nothing else.
 Example: ["Authenticate user via email or name+zip", "Look up order #W12345 details", "Verify order is pending", "Present cancellation details and get confirmation", "Cancel order with reason 'no longer needed'"]"""
 
 PLANNER_SYSTEM_PROMPT_AIRLINE = """You are a task decomposition assistant for an airline customer service agent.
@@ -47,6 +48,7 @@ For modification, verify: not basic economy (for flight changes)? cabin same acr
 For compensation, verify: user explicitly complained and asked? eligible membership/insurance/cabin?
 
 Output ONLY a JSON array of strings. No other text.
+Do NOT include any <think> tags or reasoning. Respond with ONLY the JSON array, nothing else.
 Example: ["Obtain user id", "Look up reservation details", "Verify cancellation eligibility (check booking time, cabin class, insurance)", "Present cancellation details and get confirmation", "Cancel reservation", "Confirm refund timeline to user"]"""
 
 
@@ -120,7 +122,8 @@ class TaskPlanner:
                 custom_llm_provider=self.provider,
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=1024,
+                max_tokens=2048,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             content = res.choices[0].message.content.strip()
             cost = res._hidden_params.get("response_cost") or 0
