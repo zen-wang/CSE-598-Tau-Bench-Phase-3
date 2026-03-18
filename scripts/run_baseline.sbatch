@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -c 8
 #SBATCH -N 1
-#SBATCH -t 0-15:00
+#SBATCH -t 0-10:00
 #SBATCH -p general
 #SBATCH -q class
 #SBATCH -A class_cse57388551fall2025
@@ -12,13 +12,20 @@
 #SBATCH --job-name=tau-bench
 
 ###############################################################################
+# Runs ONE baseline (react, act, or tool-calling) for one model + domain.
+# vLLM servers start once and run for the duration of the job.
+#
 # Usage:
-#   sbatch scripts/run_benchmark.sbatch                          # defaults: 4b, retail, react, 5 trials
-#   sbatch scripts/run_benchmark.sbatch 14b                      # 14b agent
-#   sbatch scripts/run_benchmark.sbatch 14b airline              # 14b agent, airline domain
-#   sbatch scripts/run_benchmark.sbatch 14b retail react 3       # 14b, retail, react, 3 trials
-#   sbatch scripts/run_benchmark.sbatch 4b retail react 5 "0"   # 1 task only (smoke test)
-#   sbatch scripts/run_benchmark.sbatch 4b retail react 5 "0 1 2"  # tasks 0,1,2 only
+#   sbatch scripts/run_baseline.sbatch                             # defaults: 4b, retail, react, 5 trials
+#   sbatch scripts/run_baseline.sbatch 14b airline react           # 14b, airline, react
+#   sbatch scripts/run_baseline.sbatch 14b airline tool-calling 5  # 14b, airline, tool-calling, 5 trials
+#   sbatch scripts/run_baseline.sbatch 4b retail react 5 "0"      # smoke test: 1 task only
+#   sbatch scripts/run_baseline.sbatch 4b retail react 5 "0 1 2"  # tasks 0,1,2 only
+#
+# Submission plan (submit one job per strategy):
+#   sbatch scripts/run_baseline.sbatch 14b airline react 5
+#   sbatch scripts/run_baseline.sbatch 14b airline act 5
+#   sbatch scripts/run_baseline.sbatch 14b airline tool-calling 5
 #
 # Check status:   squeue -u $USER
 # Check output:   tail -f results/slurm-<jobid>.out
@@ -36,28 +43,25 @@ TASK_IDS="${5:-}"              # optional: "0" or "0 1 2" (empty = all tasks)
 AGENT_MODEL="agent-${AGENT_SIZE}"
 AGENT_PORT=8000
 USER_PORT=8001
-PROXY_PORT=9090
+PROXY_PORT=9000
 
 # GPU memory allocation per agent size
 case "$AGENT_SIZE" in
     4b)  AGENT_GPU=0.15; USER_GPU=0.55; CONCURRENCY=3 ;;
     8b)  AGENT_GPU=0.20; USER_GPU=0.55; CONCURRENCY=3 ;;
-    14b) AGENT_GPU=0.30; USER_GPU=0.55; CONCURRENCY=2 ;;
+    14b) AGENT_GPU=0.30; USER_GPU=0.55; CONCURRENCY=3 ;;
     32b) AGENT_GPU=0.45; USER_GPU=0.45; CONCURRENCY=1 ;;
     *)   echo "Unknown agent size: $AGENT_SIZE"; exit 1 ;;
 esac
 
-# --- Log setup (works for both srun and sbatch) ---
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOGFILE="results/${STRATEGY}-agent-${AGENT_SIZE}-${ENV}-${TIMESTAMP}.log"
+# --- Log setup ---
 mkdir -p results
-echo "Logging to: ${LOGFILE}"
-
 echo "============================================"
 echo "Agent: Qwen3-${AGENT_SIZE^^}-AWQ (gpu=${AGENT_GPU})"
 echo "User sim: Qwen3-32B-AWQ (gpu=${USER_GPU})"
 echo "Env: ${ENV}, Strategy: ${STRATEGY}"
-echo "Trials: ${NUM_TRIALS}, Concurrency: ${CONCURRENCY}, Tasks: ${TASK_IDS:-all}"
+echo "Trials: ${NUM_TRIALS}, Concurrency: ${CONCURRENCY}"
+echo "Tasks: ${TASK_IDS:-all}"
 echo "============================================"
 
 # --- Environment setup ---
@@ -92,7 +96,7 @@ vllm serve Qwen/Qwen3-32B-AWQ \
 echo "Waiting for user simulator to be ready..."
 for i in $(seq 1 60); do
     if curl -s http://localhost:${USER_PORT}/health > /dev/null 2>&1; then
-        echo "  User sim (port ${USER_PORT}) ready"
+        echo "  User sim (port ${USER_PORT}) ready after $((i*5)) seconds"
         break
     fi
     if [ $i -eq 60 ]; then
@@ -117,7 +121,7 @@ vllm serve Qwen/Qwen3-${AGENT_SIZE^^}-AWQ \
 echo "Waiting for agent to be ready..."
 for i in $(seq 1 60); do
     if curl -s http://localhost:${AGENT_PORT}/health > /dev/null 2>&1; then
-        echo "  Agent (port ${AGENT_PORT}) ready"
+        echo "  Agent (port ${AGENT_PORT}) ready after $((i*5)) seconds"
         break
     fi
     if [ $i -eq 60 ]; then
@@ -137,22 +141,25 @@ echo "Verifying connectivity..."
 curl -s http://localhost:${PROXY_PORT}/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d "{\"model\":\"${AGENT_MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":5}" \
-    > /dev/null 2>&1 && echo "  Agent: OK" || echo "  Agent: FAILED"
+    > /dev/null 2>&1 && echo "  Agent: OK" || { echo "  Agent: FAILED"; cleanup; exit 1; }
 
 curl -s http://localhost:${PROXY_PORT}/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{"model":"user-32b","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' \
-    > /dev/null 2>&1 && echo "  User sim: OK" || echo "  User sim: FAILED"
+    > /dev/null 2>&1 && echo "  User sim: OK" || { echo "  User sim: FAILED"; cleanup; exit 1; }
 
-# --- Run benchmark ---
-echo ""
-echo "Starting benchmark..."
-echo "============================================"
-
+# --- Build task flag ---
 TASK_FLAG=""
 if [ -n "${TASK_IDS}" ]; then
     TASK_FLAG="--task-ids ${TASK_IDS}"
 fi
+
+# --- Run single baseline ---
+echo ""
+echo "============================================"
+echo "Running: ${STRATEGY} | agent-${AGENT_SIZE} | ${ENV}"
+echo "Started at: $(date)"
+echo "============================================"
 
 python src/run_eval.py \
     --env ${ENV} \
@@ -163,12 +170,22 @@ python src/run_eval.py \
     --user-model-provider openai \
     --num-trials ${NUM_TRIALS} \
     --max-concurrency ${CONCURRENCY} \
+    --baseline \
     ${TASK_FLAG}
 
 BENCH_EXIT=$?
 
+if [ $BENCH_EXIT -eq 0 ]; then
+    echo "${STRATEGY} completed successfully at $(date)"
+else
+    echo "${STRATEGY} FAILED with exit code ${BENCH_EXIT} at $(date)"
+fi
+
 echo ""
 echo "============================================"
-echo "Benchmark complete."
+echo "Baseline finished for ${AGENT_SIZE} / ${ENV} / ${STRATEGY}"
+echo "Exit code: ${BENCH_EXIT}"
+echo "Finished at: $(date)"
+echo "============================================"
 cleanup
 exit $BENCH_EXIT

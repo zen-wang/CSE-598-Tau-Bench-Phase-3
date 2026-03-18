@@ -25,8 +25,14 @@ from tau_bench.envs import get_env
 from tau_bench.types import EnvRunResult
 from tau_bench.envs.user import UserStrategy
 from litellm import provider_list
+import litellm
+import httpx
 
 from src.pipeline.pipeline_agent import PipelineAgent
+
+# Fix litellm Bug #16: HTTPHandler TTL expiry closes shared httpx.Client after 1 hour,
+# crashing all subsequent requests. Setting client_session bypasses the TTL cache entirely.
+litellm.client_session = httpx.Client(timeout=httpx.Timeout(timeout=600.0, connect=5.0))
 
 
 def parse_args():
@@ -78,7 +84,7 @@ def parse_args():
         "--user-strategy", type=str, default="llm",
         choices=[item.value for item in UserStrategy],
     )
-    parser.add_argument("--max-num-steps", type=int, default=30)
+    parser.add_argument("--max-num-steps", type=int, default=20)
 
     # --- Pipeline-specific args ---
     parser.add_argument(
@@ -193,18 +199,18 @@ def run(args) -> List[EnvRunResult]:
             random.shuffle(idxs)
 
         def _run(idx: int) -> EnvRunResult:
-            # Each thread gets its own env instance
-            isolated_env = get_env(
-                args.env,
-                user_strategy=args.user_strategy,
-                user_model=args.user_model,
-                task_split=args.task_split,
-                user_provider=args.user_model_provider,
-                task_index=idx,
-            )
-
             print(f"Running task {idx} (trial {i})")
             try:
+                # Each thread gets its own env instance
+                isolated_env = get_env(
+                    args.env,
+                    user_strategy=args.user_strategy,
+                    user_model=args.user_model,
+                    task_split=args.task_split,
+                    user_provider=args.user_model_provider,
+                    task_index=idx,
+                )
+
                 res = agent.solve(
                     env=isolated_env,
                     task_index=idx,

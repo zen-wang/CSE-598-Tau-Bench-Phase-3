@@ -2,6 +2,9 @@
 reference/
 study_guides/
 docs/CSE_598_Phase1.pdf
+docs/CSE 598 Phase1.pdf
+docs/Language Agents for *.pdf
+docs/Material/
 
 # Claude Code session data
 CLAUDE.md
@@ -9,6 +12,9 @@ CLAUDE.md
 *.jsonl
 MEMORY.md
 review.md
+
+# Superpowers plans (Claude Code internal)
+docs/superpowers/
 
 # OS files
 .DS_Store
@@ -31,5 +37,16 @@ node_modules/
 *.swp
 *.swo
 
-# Results (generated at runtime, large)
+# Results (generated at runtime, large — 274MB+ Phase1, growing Phase3)
 results/
+Phase1-result/
+
+# Generated report artifacts (binary/large)
+docs/report/*.docx
+docs/report/*.json
+
+# Gaudi / HPC artifacts
+.graph_dumps/
+*.sif
+
+docs/report/

@@ -145,12 +145,13 @@ Try to be helpful and always follow the policy. Always make sure you generate va
 # ---------------------------------------------------------------------------
 
 # Qwen3 models have max_position_embeddings=40960 with no rope scaling.
-MAX_CONTEXT_TOKENS = 40960
+MAX_CONTEXT_TOKENS = int(os.environ.get("MAX_CONTEXT_TOKENS", "40960"))
 # Reduced from 36000 to 30000 to account for tokenizer mismatch:
 # litellm uses tiktoken (GPT tokenizer) which undercounts vs Qwen3 tokenizer.
 # With ~20% margin, 30000 estimated → ~36000 actual, safely under 40960.
-TOKEN_BUDGET = 30000
-EMERGENCY_BUDGET = 35000   # if system prompt alone is near limit
+# Override via TOKEN_BUDGET env var for lower max-model-len (e.g., Gaudi 16384).
+TOKEN_BUDGET = int(os.environ.get("TOKEN_BUDGET", "30000"))
+EMERGENCY_BUDGET = int(os.environ.get("EMERGENCY_BUDGET", str(TOKEN_BUDGET + 5000)))
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +465,7 @@ class PipelineAgent(Agent):
         return self._completion_checker
 
     def solve(
-        self, env: Env, task_index: Optional[int] = None, max_num_steps: int = 30
+        self, env: Env, task_index: Optional[int] = None, max_num_steps: int = 20
     ) -> SolveResult:
         total_cost = 0.0
 
@@ -644,6 +645,7 @@ class PipelineAgent(Agent):
                 custom_llm_provider=self.provider,
                 messages=messages,
                 temperature=self.temperature,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         except ContextWindowExceededError:
             # Emergency truncation: aggressively cut context and retry
@@ -657,6 +659,7 @@ class PipelineAgent(Agent):
                 custom_llm_provider=self.provider,
                 messages=messages,
                 temperature=self.temperature,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         message = res.choices[0].message
         action_str = (message.content or "").split("Action:")[-1].strip()
@@ -686,6 +689,7 @@ class PipelineAgent(Agent):
                 custom_llm_provider=self.provider,
                 tools=self.tools_info,
                 temperature=self.temperature,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         except ContextWindowExceededError:
             logger.warning(
@@ -699,6 +703,7 @@ class PipelineAgent(Agent):
                 custom_llm_provider=self.provider,
                 tools=self.tools_info,
                 temperature=self.temperature,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         next_message = res.choices[0].message.model_dump()
         action = _message_to_action(next_message)

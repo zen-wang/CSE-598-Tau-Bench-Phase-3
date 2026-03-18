@@ -317,6 +317,7 @@ class ActionGate:
                 custom_llm_provider=self.provider,
                 messages=messages,
                 temperature=self.temperature,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         except ContextWindowExceededError:
             logging.getLogger(__name__).warning(
@@ -330,6 +331,7 @@ class ActionGate:
                 custom_llm_provider=self.provider,
                 messages=messages,
                 temperature=self.temperature,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         message = res.choices[0].message
         action_str = (message.content or "").split("Action:")[-1].strip()
@@ -358,6 +360,7 @@ class ActionGate:
                 custom_llm_provider=self.provider,
                 tools=self.tools_info,
                 temperature=self.temperature,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         except ContextWindowExceededError:
             logging.getLogger(__name__).warning(
@@ -372,6 +375,7 @@ class ActionGate:
                 custom_llm_provider=self.provider,
                 tools=self.tools_info,
                 temperature=self.temperature,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         next_message = res.choices[0].message.model_dump()
         action = _message_to_action(next_message)

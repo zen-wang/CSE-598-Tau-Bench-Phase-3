@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -c 8
 #SBATCH -N 1
-#SBATCH -t 0-23:00
+#SBATCH -t 0-10:00
 #SBATCH -p general
 #SBATCH -q class
 #SBATCH -A class_cse57388551fall2025
@@ -50,7 +50,7 @@ PROXY_PORT=9000
 case "$AGENT_SIZE" in
     4b)  AGENT_GPU=0.15; USER_GPU=0.55; CONCURRENCY=3 ;;
     8b)  AGENT_GPU=0.20; USER_GPU=0.55; CONCURRENCY=3 ;;
-    14b) AGENT_GPU=0.30; USER_GPU=0.55; CONCURRENCY=2 ;;
+    14b) AGENT_GPU=0.30; USER_GPU=0.55; CONCURRENCY=3 ;;
     32b) AGENT_GPU=0.45; USER_GPU=0.45; CONCURRENCY=1 ;;
     *)   echo "Unknown agent size: $AGENT_SIZE"; exit 1 ;;
 esac
@@ -115,6 +115,8 @@ vllm serve Qwen/Qwen3-${AGENT_SIZE^^}-AWQ \
     --enforce-eager \
     --max-model-len 40960 \
     --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
     --max-num-seqs 16 &
 
 echo "Waiting for agent to be ready..."
